@@ -1,4 +1,4 @@
-# icecast-radio-notifier
+# Icecast Radio Notifier
 
 ## Описание
 Icecast Radio Notifier - бот для Telegram, который отслеживает состояние Icecast радио и уведомляет об этом.
