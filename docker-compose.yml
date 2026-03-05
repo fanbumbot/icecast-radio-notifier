@@ -1,0 +1,13 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+    env_file: .env
+    entrypoint: /app/entrypoint.sh
+    restart: always

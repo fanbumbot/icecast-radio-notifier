@@ -1,0 +1,11 @@
+__pycache__
+.venv
+.vscode
+
+.env
+*.env
+
+src/messages.py
+
+data/*
+!data/.gitkeep
