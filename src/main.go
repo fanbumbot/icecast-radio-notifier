@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"database/sql"
@@ -25,6 +27,46 @@ type Chat struct {
 	ID              int64
 	IsActive        bool
 	LastUserVersion int
+}
+
+type Context struct {
+	bot    *tgbotapi.BotAPI
+	mainDB *sql.DB
+	msg    map[string]string
+}
+
+func getMessage(context Context, key string) string {
+	return context.msg[key]
+}
+
+func importMessages() (messages map[string]string, err error) {
+	file, err := os.ReadFile("../messages.json")
+	if err != nil {
+		file, err = os.ReadFile("../messages_template.json")
+		if err != nil {
+			return
+		}
+	}
+
+	var temp map[string]interface{}
+	if err = json.Unmarshal(file, &temp); err != nil {
+		return
+	}
+	messages = make(map[string]string, len(temp))
+	for k, v := range temp {
+		switch v := v.(type) {
+		case string:
+			messages[k] = v
+		case []any:
+			output := make([]string, len(v))
+			for i, substr := range v {
+				output[i] = substr.(string)
+			}
+			str := strings.Join(output, "\n")
+			messages[k] = str
+		}
+	}
+	return
 }
 
 func importEnv(envPath string) (tokenID string, streamURL string, err error) {
@@ -50,10 +92,10 @@ func importEnv(envPath string) (tokenID string, streamURL string, err error) {
 	return
 }
 
-func CheckStreamStatus(bot *tgbotapi.BotAPI, mainDB *sql.DB, streamURL string, waitTime time.Duration) {
+func CheckStreamStatus(context Context, streamURL string, waitTime time.Duration) {
 	ticker := time.NewTicker(waitTime)
 
-	currentStatus, err := getRadioState(mainDB)
+	currentStatus, err := getRadioStatus(context.mainDB)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}
@@ -68,14 +110,14 @@ func CheckStreamStatus(bot *tgbotapi.BotAPI, mainDB *sql.DB, streamURL string, w
 		}
 
 		if currentStatus != lastStatus {
-			err := setRadioState(mainDB, currentStatus)
+			err := setRadioStatus(context.mainDB, currentStatus)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 			}
 			if currentStatus {
-				sendMessageToAll(bot, mainDB, "Радио запущено")
+				sendMessageToAll(context.bot, context.mainDB, getMessage(context, "RADIO_ON_NOTIFICATION"))
 			} else {
-				sendMessageToAll(bot, mainDB, "Радио остановлено")
+				sendMessageToAll(context.bot, context.mainDB, getMessage(context, "RADIO_OFF_NOTIFICATION"))
 			}
 		}
 		lastStatus = currentStatus
@@ -106,6 +148,12 @@ func sendMessageToAll(bot *tgbotapi.BotAPI, mainDB *sql.DB, message string) (err
 			bot.Send(msg)
 		}
 	}
+	return
+}
+
+func sendMessageTo(bot *tgbotapi.BotAPI, chatID int64, message string) (err error) {
+	msg := tgbotapi.NewMessage(chatID, message)
+	_, err = bot.Send(msg)
 	return
 }
 
@@ -149,8 +197,8 @@ func getChats(mainDB *sql.DB) (chats []*Chat, err error) {
 	return
 }
 
-func getRadioState(mainDB *sql.DB) (radioState bool, err error) {
-	radioState = false
+func getRadioStatus(mainDB *sql.DB) (radioStatus bool, err error) {
+	radioStatus = false
 
 	rows, err := mainDB.Query("SELECT key, value FROM radio_state")
 	if err != nil {
@@ -166,24 +214,72 @@ func getRadioState(mainDB *sql.DB) (radioState bool, err error) {
 		}
 		switch key {
 		case "site_status":
-			radioState = value == "True"
+			radioStatus = value == "True"
 		}
 	}
 	return
 }
 
-func setRadioState(mainDB *sql.DB, radioState bool) (err error) {
-	var stringState string
-	if radioState {
-		stringState = "True"
+func setRadioStatus(mainDB *sql.DB, radioStatus bool) (err error) {
+	var stringStatus string
+	if radioStatus {
+		stringStatus = "True"
 	} else {
-		stringState = "False"
+		stringStatus = "False"
 	}
-	_, err = mainDB.Exec("UPDATE radio_state SET value = ? WHERE key = 'site_status'", stringState)
+	_, err = mainDB.Exec("UPDATE radio_state SET value = ? WHERE key = 'site_status'", stringStatus)
+	return
+}
+
+func processMessages(context Context) (err error) {
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+	updates := context.bot.GetUpdatesChan(u)
+
+	for update := range updates {
+		if update.Message == nil {
+			continue
+		}
+		if !update.Message.IsCommand() {
+			continue
+		}
+
+		command := update.Message.Command()
+
+		switch command {
+		case "start":
+			sendMessageTo(context.bot, update.Message.Chat.ID, getMessage(context, "START_MSG"))
+		case "stop":
+			sendMessageTo(context.bot, update.Message.Chat.ID, getMessage(context, "STOP_MSG"))
+		case "help":
+			sendMessageTo(context.bot, update.Message.Chat.ID, getMessage(context, "HELP_MSG"))
+		case "status":
+			status, err := getRadioStatus(context.mainDB)
+			if err != nil {
+				sendMessageTo(context.bot, update.Message.Chat.ID, "Unknown status")
+			}
+			if status {
+				sendMessageTo(context.bot, update.Message.Chat.ID, getMessage(context, "RADIO_ON_INFO"))
+			} else {
+				sendMessageTo(context.bot, update.Message.Chat.ID, getMessage(context, "RADIO_OFF_INFO"))
+			}
+		case "notification_status":
+			fmt.Print("Статус оповещений")
+		case "radio_hist":
+			fmt.Print("История эфиров")
+		}
+
+	}
 	return
 }
 
 func main() {
+	msg, err := importMessages()
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
 	mainDB, err := sql.Open("sqlite", "../data/database.db")
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -210,9 +306,15 @@ func main() {
 		return
 	}
 
-	go CheckStreamStatus(bot, mainDB, streamURL, time.Second*5)
+	context := Context{bot, mainDB, msg}
+
+	go CheckStreamStatus(context, streamURL, time.Second*5)
 
 	fmt.Println("Завершение инициализации")
 
-	select {}
+	err = processMessages(context)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 }
